@@ -1,0 +1,28 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.streamlit/
+.env
+*.log
+free-claude-code/
+.claude/
+mcp/
+
+
+# Generated Data and Models
+models/
+data/shipment_*.csv
+data/supplier_shipments.csv
+
+# Scratch files
+*.html
+
+# IDE / agent artifacts
+.run/
+AGENTS.md
+CLAUDE.md
+implementation.md
+summary.md
+streamlit_app.py

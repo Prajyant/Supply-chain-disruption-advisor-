@@ -1,0 +1,9 @@
+test_id,test_type,lookup_value,lookup_field,expected_sanctions_hit,expected_list_source,expected_risk_level,notes,test_scenario_tag
+SN-001,vessel_imo,9111111,imo_number,TRUE,OFAC_SDN,CRITICAL,"IMO associated with Iranian oil transport network, appears on OFAC SDN vessel list",SANCTIONS_OFAC_HIT
+SN-002,vessel_imo,9321483,imo_number,FALSE,NONE,LOW,"Maersk Edinburgh - major carrier vessel with clean compliance record",SANCTIONS_CLEAN_VESSEL
+SN-003,entity_name,Korea National Insurance Corporation,entity_name,TRUE,UN_SECURITY_COUNCIL,CRITICAL,"DPRK state entity designated under multiple UN Security Council resolutions",SANCTIONS_UN_ENTITY
+SN-004,entity_name,Mahan Air,entity_name,TRUE,OFAC_SDN,CRITICAL,"Iranian airline designated by OFAC for providing material support to IRGC-QF",SANCTIONS_PARTIAL_NAME
+SN-005,entity_name,Maersk Line A/S,entity_name,FALSE,NONE,LOW,"Major Danish shipping conglomerate with full international compliance",SANCTIONS_CLEAN_ENTITY
+SN-006,vessel_imo,9222222,imo_number,TRUE,OFAC_SDN or EU_SANCTIONS,CRITICAL,"Vessel flagged under Russia-related sanctions post-February 2022 invasion",SANCTIONS_RUSSIA_VESSEL
+SN-007,route_countries,"IR,CN",country_pair,TRUE,OFAC_SDN,HIGH,"Iran-China trade route subject to US secondary sanctions and comprehensive Iran embargo",SANCTIONS_ROUTE_IRAN
+SN-008,route_countries,"US,JP",country_pair,FALSE,NONE,LOW,"US-Japan allied trade corridor with no sanctions restrictions",SANCTIONS_ROUTE_CLEAN

@@ -1,0 +1,723 @@
+"""Advisor service that orchestrates all services."""
+from __future__ import annotations
+import asyncio
+import logging
+import re
+from typing import Any, Optional
+
+from app.models.schemas import ChatResponse, IngestResponse, RetrievedContext, RiskAssessment
+from app.services.ingestion_service import IngestionService
+from app.services.risk_service import RiskService
+from app.services.chat_service import ChatService
+from app.services.graph_service import GraphService
+from app.services.shipment_tracker import ShipmentTracker, ShipmentStatus
+from app.services.playbook_engine import PlaybookEngine
+from app.services.feedback_service import FeedbackService
+from app.websocket.manager import manager
+
+logger = logging.getLogger(__name__)
+
+
+# Location keywords for connecting news to nodes
+LOCATION_KEYWORDS: dict[str, list[str]] = {
+    "china": ["china", "chinese", "shanghai", "shenzhen", "beijing", "guangzhou"],
+    "taiwan": ["taiwan", "taiwanese", "taipei", "tsmc"],
+    "korea": ["korea", "korean", "seoul", "busan"],
+    "japan": ["japan", "japanese", "tokyo", "osaka"],
+    "usa": ["usa", "us", "united states", "american", "detroit", "chicago", "los angeles", "newark"],
+    "europe": ["europe", "european", "germany", "france", "uk", "rotterdam"],
+    "india": ["india", "indian", "mumbai", "chennai"],
+    "southeast_asia": ["vietnam", "thailand", "malaysia", "singapore", "indonesia"],
+}
+
+
+class AdvisorService:
+    """Main service that orchestrates all supply chain disruption advisor services."""
+
+    def __init__(
+        self,
+        ingestion_service: Optional[IngestionService] = None,
+        risk_service: Optional[RiskService] = None,
+        chat_service: Optional[ChatService] = None,
+        graph_service: Optional[GraphService] = None,
+        shipment_tracker: Optional[ShipmentTracker] = None,
+        playbook_engine: Optional[PlaybookEngine] = None,
+        feedback_service: Optional[FeedbackService] = None,
+    ) -> None:
+        self.ingestion_service = ingestion_service or IngestionService()
+        self.risk_service = risk_service or RiskService()
+        self.chat_service = chat_service or ChatService()
+        self.graph_service = graph_service or GraphService()
+
+        # Phase 3: Shipment tracking, playbooks, feedback
+        self.shipment_tracker = shipment_tracker or ShipmentTracker()
+        self.playbook_engine = playbook_engine or PlaybookEngine()
+        self.feedback_service = feedback_service or FeedbackService()
+
+        # Context caches (populated at ingest time)
+        self._cached_news_events: list[dict] = []
+        self._cached_email_events: list[dict] = []
+
+        # Load sample graph
+        self.graph_service.load_sample_graph()
+
+    def ingest(
+        self,
+        supplier_emails_path: str,
+        news_feed_path: str,
+        inventory_path: str,
+        use_realtime_news: bool = True,
+        use_live_emails: bool = False,
+    ) -> IngestResponse:
+        """Ingest data from multiple sources, then run predictive cross-reference.
+
+        The key innovation: instead of scanning each event individually,
+        we SEPARATE emails from news, then cross-reference them to predict
+        which normal operations might be disrupted by current world events.
+        """
+        result = self.ingestion_service.ingest(
+            supplier_emails_path=supplier_emails_path,
+            news_feed_path=news_feed_path,
+            inventory_path=inventory_path,
+            use_realtime_news=use_realtime_news,
+            use_live_emails=use_live_emails,
+        )
+
+        # Set up chat service with the new index
+        index = self.ingestion_service.get_index()
+        if index:
+            self.chat_service.set_index(index)
+
+        events = result.get("events", [])
+
+        # ---------------------------------------------------------------
+        # STEP 1: Separate emails (operations) from news
+        # ---------------------------------------------------------------
+        email_events = [
+            e for e in events
+            if e.get("source") in ("supplier_email", "live_email", "inventory")
+        ]
+        news_events = [
+            e for e in events
+            if e.get("source") not in ("supplier_email", "live_email", "inventory")
+        ]
+
+        # Cache for context enrichment
+        self._cached_news_events = news_events
+        self._cached_email_events = email_events
+
+        logger.info(
+            f"Separated {len(email_events)} operational emails and "
+            f"{len(news_events)} news events for cross-reference"
+        )
+
+        # ---------------------------------------------------------------
+        # STEP 2: Reactive layer — analyze emails/inventory only
+        # News events are context for cross-reference, NOT individual risk assessments
+        # ---------------------------------------------------------------
+        all_risks = self.risk_service.analyze_events(email_events)
+
+        # ---------------------------------------------------------------
+        # STEP 3: Run PREDICTIVE cross-reference (the magic)
+        # ---------------------------------------------------------------
+        predictions = self.risk_service.cross_reference(email_events, news_events)
+
+        # ---------------------------------------------------------------
+        # STEP 4: Map all risks to the Digital Twin graph
+        # ---------------------------------------------------------------
+        score_map = {"critical": 0.9, "high": 0.7, "medium": 0.5, "low": 0.3}
+
+        # Map reactive risks
+        for risk in all_risks:
+            supplier_name = (
+                risk.get("metadata", {}).get("sender_name")
+                or risk.get("metadata", {}).get("supplier")
+                or risk.get("supplier")
+                or "Unknown Supplier"
+            )
+            severity = risk.get("severity", "low")
+            score = score_map.get(severity, 0.3)
+            self._map_to_graph(supplier_name, score)
+
+        # Map predictive risks
+        for pred in predictions:
+            supplier_name = pred.metadata.get("email_supplier", "Unknown")
+            score = score_map.get(pred.severity, 0.3)
+            self._map_to_graph(supplier_name, score)
+
+        # ---------------------------------------------------------------
+        # STEP 5: Ingest shipments + process status updates (Phase 3)
+        # ---------------------------------------------------------------
+        self._process_shipments_sync(email_events)
+
+        # ---------------------------------------------------------------
+        # STEP 6: Update context summary cache (Phase 3)
+        # ---------------------------------------------------------------
+        self._update_context_caches(all_risks, predictions)
+
+        # ---------------------------------------------------------------
+        # STEP 7: Schedule playbook evaluation as BACKGROUND TASK (Phase 3)
+        # ---------------------------------------------------------------
+        combined_risks = self._build_risk_assessments(all_risks, predictions)
+        if combined_risks:
+            import threading
+            threading.Thread(
+                target=lambda: asyncio.run(self._evaluate_playbooks_background(combined_risks)),
+                daemon=True
+            ).start()
+
+        # ---------------------------------------------------------------
+        # STEP 8: Send SES email alerts for high/critical risks
+        # ---------------------------------------------------------------
+        self._send_risk_alert_emails(combined_risks)
+
+        # Count predictions for the response message
+        pred_count = len(predictions)
+
+        # Update global chat context so the advisor can answer from any page
+        self._refresh_chat_global_context()
+
+        message = result["message"]
+        if pred_count > 0:
+            message += f" 🔮 Predictive engine found {pred_count} potential disruptions by cross-referencing your operations with world news."
+        else:
+            message += f" ✅ No predicted disruptions found — your active operations appear safe."
+
+        pb_count = len(combined_risks)
+        if pb_count > 0:
+            message += f" ⚡ Evaluating {pb_count} risks against automated playbooks..."
+
+        return IngestResponse(
+            ingested_events=result["ingested_events"],
+            indexed_chunks=result["indexed_chunks"],
+            message=message,
+        )
+
+    # -------------------------------------------------------------------
+    # Phase 3: Shipment processing
+    # -------------------------------------------------------------------
+
+    def _process_shipments_sync(self, email_events: list[dict]) -> None:
+        """Ingest shipments and process status updates synchronously."""
+        try:
+            created = 0
+            for event in email_events:
+                shipment = self.shipment_tracker._parse_shipment_from_event(event)
+                if shipment:
+                    self.shipment_tracker._shipments[shipment.id] = shipment
+                    if shipment.tracking_number:
+                        self.shipment_tracker._tracking_index[shipment.tracking_number.lower()] = shipment.id
+                    supplier_key = shipment.supplier.lower().strip()
+                    if supplier_key not in self.shipment_tracker._supplier_index:
+                        self.shipment_tracker._supplier_index[supplier_key] = []
+                    if shipment.id not in self.shipment_tracker._supplier_index[supplier_key]:
+                        self.shipment_tracker._supplier_index[supplier_key].append(shipment.id)
+                    created += 1
+
+            logger.info(f"ShipmentTracker sync-ingested {created} shipments from {len(email_events)} events")
+
+            # Load and process follow-up status updates
+            update_events = self.shipment_tracker.load_shipment_updates_csv()
+            if update_events:
+                for event in update_events:
+                    shipment = self.shipment_tracker._parse_shipment_from_event(event)
+                    if shipment:
+                        self.shipment_tracker._shipments[shipment.id] = shipment
+                        if shipment.tracking_number:
+                            self.shipment_tracker._tracking_index[shipment.tracking_number.lower()] = shipment.id
+                        supplier_key = shipment.supplier.lower().strip()
+                        if supplier_key not in self.shipment_tracker._supplier_index:
+                            self.shipment_tracker._supplier_index[supplier_key] = []
+                        if shipment.id not in self.shipment_tracker._supplier_index[supplier_key]:
+                            self.shipment_tracker._supplier_index[supplier_key].append(shipment.id)
+
+                for event in update_events:
+                    result = self.shipment_tracker._process_single_update(event)
+                    if result:
+                        if result.risk_score_change is not None:
+                            self._map_to_graph(result.supplier, result.risk_score_change)
+                        logger.info(
+                            f"Shipment {result.shipment_id}: {result.old_status} → {result.new_status}"
+                        )
+
+        except Exception as e:
+            logger.error(f"Shipment processing failed: {e}", exc_info=True)
+
+    # -------------------------------------------------------------------
+    # Phase 3: Context caches & playbook evaluation
+    # -------------------------------------------------------------------
+
+    def _update_context_caches(
+        self, reactive_risks: list[dict], predictions: list[RiskAssessment]
+    ) -> None:
+        """Precompute lightweight context summaries per node."""
+        risk_counts: dict[str, int] = {}
+        has_critical: dict[str, bool] = {}
+
+        for risk in reactive_risks:
+            meta = risk.get("metadata", {}) or {}
+            supplier = meta.get("sender_name", "") or meta.get("supplier", "")
+            if supplier:
+                node_id = self._resolve_node_id(supplier)
+                if node_id:
+                    risk_counts[node_id] = risk_counts.get(node_id, 0) + 1
+                    if risk.get("severity") == "critical":
+                        has_critical[node_id] = True
+
+        for pred in predictions:
+            supplier = pred.metadata.get("email_supplier", "")
+            if supplier:
+                node_id = self._resolve_node_id(supplier)
+                if node_id:
+                    risk_counts[node_id] = risk_counts.get(node_id, 0) + 1
+                    if pred.severity == "critical":
+                        has_critical[node_id] = True
+
+        for node_id, count in risk_counts.items():
+            shipment_count = self.shipment_tracker.get_shipment_count_for_supplier(
+                self.graph_service.get_node(node_id).get("name", "") if self.graph_service.get_node(node_id) else ""
+            )
+            self.graph_service.update_context_summary(
+                node_id,
+                shipment_count=shipment_count,
+                risk_count=count,
+                has_critical_risk=has_critical.get(node_id, False),
+            )
+
+    def _build_risk_assessments(
+        self, reactive_risks: list[dict], predictions: list[RiskAssessment]
+    ) -> list[RiskAssessment]:
+        """Build combined risk list for playbook evaluation."""
+        all_risks: list[dict] = []
+        for pred in predictions:
+            all_risks.append(pred.model_dump())
+        for risk in reactive_risks:
+            meta = risk.get("metadata", {}) or {}
+            if meta.get("_news_context_only"):
+                continue
+            if risk.get("severity") != "low":
+                all_risks.append(risk)
+        return [RiskAssessment(**r) for r in all_risks] if all_risks else []
+
+    async def _evaluate_playbooks_background(self, risks: list[RiskAssessment]) -> None:
+        """Evaluate playbooks against risks in a background thread."""
+        try:
+            triggered = await self.playbook_engine.evaluate_risks(risks)
+            if triggered:
+                logger.info(
+                    f"Playbook engine triggered {len(triggered)} executions "
+                    f"from {len(risks)} risks"
+                )
+                await manager.broadcast(
+                    {"type": "playbook_executions", "count": len(triggered)},
+                    "alerts",
+                )
+                # Send email notifications for triggered playbooks via SES
+                await self._send_playbook_emails(triggered)
+        except Exception as e:
+            logger.error(f"Playbook evaluation failed: {e}", exc_info=True)
+
+    async def _send_playbook_emails(self, executions: list) -> None:
+        """Send SES email notifications for triggered playbook executions."""
+        try:
+            from app.services.email_service import EmailService
+            email_service = EmailService()
+
+            for execution in executions:
+                # Send playbook notification
+                actions = [a.description for a in execution.actions]
+                risk_score = {"critical": 0.9, "high": 0.7, "medium": 0.5, "low": 0.2}.get(
+                    execution.severity, 0.5
+                )
+                result = email_service.send_playbook_notification(
+                    playbook_name=execution.playbook_name,
+                    node_name=execution.node_name,
+                    actions=actions,
+                    risk_score=risk_score,
+                )
+                if result.success:
+                    logger.info(
+                        "SES playbook email sent: %s -> %s",
+                        execution.playbook_name, result.recipients_notified,
+                    )
+                else:
+                    logger.warning("SES playbook email failed: %s", result.error)
+        except Exception as e:
+            logger.error(f"Playbook email notification failed: {e}")
+
+    # -------------------------------------------------------------------
+    # SES risk alert emails
+    # -------------------------------------------------------------------
+
+    def _send_risk_alert_emails(self, risks: list[RiskAssessment]) -> None:
+        """Send SES email alerts for high and critical severity risks.
+
+        Only sends for high/critical to avoid spamming on routine low/medium risks.
+        """
+        try:
+            from app.services.email_service import EmailService
+            email_service = EmailService()
+
+            alertable = [r for r in risks if r.severity in ("critical", "high")]
+            if not alertable:
+                return
+
+            for risk in alertable:
+                result = email_service.send_routed_alert(
+                    risk_severity=risk.severity,
+                    risk_headline=risk.headline or risk.summary[:100],
+                    supplier=risk.metadata.get("email_supplier", risk.metadata.get("sender_name", "")),
+                    disruption_type=risk.disruption_type,
+                    recommendations=risk.recommendations,
+                )
+                if result.success:
+                    logger.info(
+                        "SES risk alert sent: severity=%s, category=%s, recipients=%s",
+                        risk.severity, result.category, result.recipients_notified,
+                    )
+                else:
+                    logger.warning("SES risk alert failed: %s", result.error)
+
+            logger.info("Sent %d SES risk alert emails", len(alertable))
+        except Exception as e:
+            logger.error(f"Risk alert email sending failed: {e}")
+
+    # -------------------------------------------------------------------
+    # Global chat context refresh
+    # -------------------------------------------------------------------
+
+    def _refresh_chat_global_context(self) -> None:
+        """Push current system state into the ChatService global context.
+
+        Called after ingestion so the chat advisor has full awareness of
+        risks, shipments, weather, trade, and network state.
+        """
+        try:
+            from app.ingestion.weather_monitor import fetch_weather_events
+            from app.ingestion.trade_monitor import fetch_trade_policy_events
+
+            # Gather risks
+            risks = []
+            reactive = self.risk_service.get_risks()
+            predictions = self.risk_service.get_predictions()
+            for pred in predictions:
+                risks.append(pred.model_dump() if hasattr(pred, "model_dump") else pred)
+            for r in reactive:
+                meta = r.get("metadata", {}) or {}
+                if not meta.get("_news_context_only") and r.get("severity") != "low":
+                    risks.append(r)
+
+            # Gather shipments
+            shipments = self.shipment_tracker.get_all_shipments()
+
+            # Weather and trade (use cached news events as trade context)
+            weather_events = self._cached_news_events if not self._cached_news_events else []
+            trade_events = []
+            try:
+                weather_events = fetch_weather_events(20)
+                trade_events = fetch_trade_policy_events(15)
+            except Exception:
+                pass
+
+            # Network summary
+            total_nodes = len(self.graph_service.graph.nodes)
+            at_risk = sum(
+                1 for n in self.graph_service.graph.nodes.values()
+                if n.direct_risk >= 0.5
+            )
+            network_summary = {
+                "total_nodes": total_nodes,
+                "at_risk_nodes": at_risk,
+            }
+
+            self.chat_service.update_global_context(
+                risks=risks,
+                shipments=shipments,
+                weather_events=weather_events,
+                trade_events=trade_events,
+                network_summary=network_summary,
+            )
+            logger.info(
+                "Chat global context refreshed: %d risks, %d shipments",
+                len(risks), len(shipments),
+            )
+        except Exception as e:
+            logger.error(f"Failed to refresh chat global context: {e}")
+
+    # -------------------------------------------------------------------
+    # Graph mapping
+    # -------------------------------------------------------------------
+
+    def _map_to_graph(self, supplier_name: str, score: float) -> None:
+        """Map a risk to the Digital Twin graph, creating nodes dynamically."""
+        if supplier_name == "Unknown Supplier":
+            return
+
+        # Check for existing node
+        node_id = "live_" + re.sub(r"[^a-z0-9]", "_", supplier_name.lower())[:30]
+        existing = self.graph_service.graph.get_node(node_id)
+
+        if not existing:
+            # Try to find a static node with matching name
+            existing = self.graph_service.graph.get_node(
+                next(
+                    (nid for nid, n in self.graph_service.graph.nodes.items()
+                     if supplier_name.lower() in n.name.lower()),
+                    None
+                )
+            )
+
+        if existing:
+            self.graph_service.set_node_direct_risk(existing.id, score)
+        else:
+            self.graph_service.add_or_update_node(supplier_name, score)
+
+    def _resolve_node_id(self, supplier_name: str) -> Optional[str]:
+        """Resolve a supplier name to a graph node ID."""
+        node_id = "live_" + re.sub(r"[^a-z0-9]", "_", supplier_name.lower())[:30]
+        if self.graph_service.graph.get_node(node_id):
+            return node_id
+        for nid, n in self.graph_service.graph.nodes.items():
+            if supplier_name.lower() in n.name.lower():
+                return nid
+        return None
+
+    # -------------------------------------------------------------------
+    # Risk queries
+    # -------------------------------------------------------------------
+
+    def get_risks(self) -> list[RiskAssessment]:
+        """Get all risk assessments (reactive + predictive).
+
+        Returns:
+            - Predictive risks (from cross-reference) — always shown
+            - Reactive risks from emails that self-reported a problem (medium/high/critical)
+            - Low-severity routine emails are suppressed — they are operational noise
+        """
+        reactive_risks = self.risk_service.get_risks()
+        predictions = self.risk_service.get_predictions()
+
+        all_risks: list[dict] = []
+
+        # Add predictions (always shown — this is the main value-add)
+        for pred in predictions:
+            all_risks.append(pred.model_dump())
+
+        # Add reactive email risks — only those that actually flagged a problem
+        for risk in reactive_risks:
+            meta = risk.get("metadata", {}) or {}
+            # Skip news context placeholders
+            if meta.get("_news_context_only"):
+                continue
+            # Skip low-severity routine operational emails (they have no problem to report)
+            if risk.get("severity") == "low":
+                continue
+            all_risks.append(risk)
+
+        if not all_risks:
+            return []
+
+        # Sort: predictions first, then by severity descending
+        severity_order = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+
+        def sort_key(r: dict) -> tuple:
+            is_pred = 1 if r.get("metadata", {}).get("type") == "prediction" else 0
+            sev = severity_order.get(r.get("severity", "low"), 0)
+            return (is_pred, sev)
+
+        all_risks.sort(key=sort_key, reverse=True)
+        return [RiskAssessment(**r) for r in all_risks]
+
+    # -------------------------------------------------------------------
+    # Phase 3: Node context
+    # -------------------------------------------------------------------
+
+    def get_node_context(self, node_id: str) -> Optional[dict]:
+        """Get full enriched context for a node (called on node click).
+
+        Enriches the graph_service base context with:
+        - Active shipments from ShipmentTracker
+        - Pending orders from cached inventory
+        - Risk history from RiskService
+        - Connected news (top 3 by relevance, threshold > 0.6)
+        - days_buffer calculation
+        """
+        context = self.graph_service.get_node_context(node_id)
+        if not context:
+            return None
+
+        node_name = context["name"]
+
+        # Enrich with shipments
+        context["active_shipments"] = self.shipment_tracker.get_shipments_for_node(
+            node_id, node_name
+        )
+
+        # Enrich with pending orders from inventory
+        context["pending_orders"] = self._get_orders_for_node(node_name)
+
+        # Enrich with risk history
+        context["risk_history"] = self._get_risk_history_for_node(node_name)
+
+        # Enrich with connected news (top 3, relevance > 0.6)
+        context["connected_news"] = self._get_news_for_node(
+            context["location"], node_name
+        )
+
+        # Calculate days_buffer from inventory
+        context["days_buffer"] = self._calc_days_buffer(node_name)
+
+        return context
+
+    def _get_orders_for_node(self, node_name: str) -> list[dict]:
+        """Get pending orders from cached inventory data."""
+        orders = []
+        for event in self._cached_email_events:
+            meta = event.get("metadata", {}) or {}
+            supplier = (
+                event.get("supplier", "")
+                or meta.get("sender_name", "")
+            )
+            if not supplier or node_name.lower() not in supplier.lower():
+                if supplier.lower() not in node_name.lower():
+                    continue
+            material = meta.get("material", "")
+            if material:
+                orders.append({
+                    "order_id": event.get("reference_id", ""),
+                    "supplier": supplier,
+                    "material": material,
+                    "quantity": 0,
+                    "status": "pending",
+                    "expected_date": meta.get("date", ""),
+                })
+        return orders
+
+    def _get_risk_history_for_node(self, node_name: str) -> list[dict]:
+        """Get risk history for a node from RiskService."""
+        all_risks = self.risk_service.get_risks()
+        history = []
+        for risk in all_risks:
+            meta = risk.get("metadata", {}) or {}
+            supplier = meta.get("sender_name", "")
+            if not supplier:
+                continue
+            if node_name.lower() in supplier.lower() or supplier.lower() in node_name.lower():
+                if risk.get("severity", "low") != "low":
+                    history.append({
+                        "risk_id": risk.get("risk_id", ""),
+                        "severity": risk.get("severity", "low"),
+                        "disruption_type": risk.get("disruption_type", ""),
+                        "detected_at": risk.get("detected_at", ""),
+                        "summary": risk.get("summary", ""),
+                        "source": risk.get("source", ""),
+                    })
+        return history
+
+    def _get_news_for_node(self, node_location: str, node_name: str) -> list[dict]:
+        """Get connected news articles for a node. Caps at top 3."""
+        scored_news: list[tuple[float, dict]] = []
+
+        node_loc_lower = node_location.lower()
+        node_loc_keys = set()
+        for loc, kws in LOCATION_KEYWORDS.items():
+            if any(kw in node_loc_lower for kw in kws):
+                node_loc_keys.add(loc)
+
+        if not node_loc_keys:
+            return []
+
+        for event in self._cached_news_events:
+            news_text = str(event.get("text", "")).lower()
+            meta = event.get("metadata", {}) or {}
+
+            matches = 0
+            total_keywords = 0
+            for loc in node_loc_keys:
+                kws = LOCATION_KEYWORDS.get(loc, [])
+                total_keywords += len(kws)
+                matches += sum(1 for kw in kws if kw in news_text)
+
+            if total_keywords == 0:
+                continue
+            relevance = min(1.0, matches / max(1, len(node_loc_keys)))
+
+            if relevance > 0.6:
+                headline = meta.get("title", "") or event.get("text", "")[:80]
+                scored_news.append((relevance, {
+                    "news_id": event.get("reference_id", ""),
+                    "headline": headline,
+                    "region": meta.get("region", ""),
+                    "date": meta.get("date", event.get("event_time", "")),
+                    "relevance_score": round(relevance, 2),
+                }))
+
+        scored_news.sort(key=lambda x: x[0], reverse=True)
+        return [n[1] for n in scored_news[:3]]
+
+    def _calc_days_buffer(self, node_name: str) -> Optional[int]:
+        """Calculate days_buffer: (current_stock - safety_stock) / daily_consumption."""
+        for event in self._cached_email_events:
+            if event.get("source") != "inventory":
+                continue
+            meta = event.get("metadata", {}) or {}
+            supplier = meta.get("primary_supplier", "")
+            if supplier and (
+                node_name.lower() in supplier.lower()
+                or supplier.lower() in node_name.lower()
+            ):
+                stock = float(meta.get("current_stock", 0) or 0)
+                reorder = float(meta.get("reorder_point", 0) or 0)
+                days_cover = int(meta.get("days_of_cover", 0) or 0)
+                if days_cover > 0 and stock > 0:
+                    daily = stock / days_cover
+                    if daily > 0:
+                        return max(0, int((stock - reorder) / daily))
+        return None
+
+    # -------------------------------------------------------------------
+    # Phase 3: Shipment queries
+    # -------------------------------------------------------------------
+
+    def get_shipments(self) -> list[dict]:
+        """Get all tracked shipments."""
+        return self.shipment_tracker.get_all_shipments()
+
+    def get_shipments_for_node(self, node_id: str) -> list[dict]:
+        """Get shipments for a specific node."""
+        node = self.graph_service.get_node(node_id)
+        node_name = node.get("name", "") if node else ""
+        return self.shipment_tracker.get_shipments_for_node(node_id, node_name)
+
+    def chat(self, question: str, top_k: int = 5) -> ChatResponse:
+        """Query the AI advisor."""
+        result = self.chat_service.chat(question, top_k)
+
+        contexts = [
+            RetrievedContext(
+                source="unknown",
+                reference_id="",
+                text=text,
+                score=0.0,
+                metadata={},
+            )
+            for text in result.get("supporting_context", [])
+        ]
+
+        return ChatResponse(
+            answer=result.get("answer", ""),
+            supporting_context=contexts,
+            recommendations=result.get("recommendations", []),
+        )
+
+    def get_network(self) -> dict:
+        """Get the supply chain network graph."""
+        return self.graph_service.get_network()
+
+    def get_node(self, node_id: str) -> Optional[dict]:
+        """Get details for a specific node."""
+        return self.graph_service.get_node(node_id)
+
+    def propagate_risk(self) -> dict:
+        """Trigger risk propagation through the graph."""
+        return self.graph_service.propagate_risk()

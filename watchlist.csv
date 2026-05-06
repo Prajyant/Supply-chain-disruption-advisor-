@@ -1,0 +1,21 @@
+imo_number,vessel_name,linked_supplier,linked_shipment_id,notes,mmsi
+,CMA CGM SHANGHAI,CMA CGM Shipping,SHP-2001,Shanghai to Los Angeles,256995000
+,HENRIKE SCHEPERS,Henrike Logistics,SHP-2002,Rotterdam to Southampton,305268000
+,ATLANTIC KLIPPER,Atlantic Shipping,SHP-2003,Antwerp to Felixstowe,636023858
+,ALDEBARAN J,Aldebaran Transport,SHP-2004,Hamburg to Gothenburg,304972000
+,WILSON FLEX I,Wilson Line,SHP-2005,Gdansk to Stockholm,255915000
+,LAURA,Laura Shipping,SHP-2006,Malmo to Kiel,230350000
+,OOZU MARU,Oozu Maritime,SHP-2007,Kobe to Osaka,431008812
+,CORAL SIDEREA,Coral LNG,SHP-2008,Stavanger to Esbjerg,244857000
+,CIUDAD DE SOLLER,Ciudad Ferries,SHP-2009,Valencia to Palma,224729000
+,FORTE DE SAO MARCOS,Forte Shipping,SHP-2010,Recife to Salvador,710001600
+,WAY FORWARD,Way Forward Ltd,SHP-2011,Southampton to Rotterdam,265055000
+,CGAS MASTER,CGAS Maritime,SHP-2012,Rotterdam to Immingham,215389000
+,FJORDJARL,Fjord Express,SHP-2013,Tromso to Harstad,257095920
+,SAPELE,Sapele Logistics,SHP-2014,London to Tilbury,235054851
+,PHENIX,Phenix Transport,SHP-2015,Portsmouth to Le Havre,235053701
+,J THEMISTOCLIS MORAN,Moran Towing,SHP-2016,Houston to Galveston,368433550
+,TWO RIVERS,Two Rivers Shipping,SHP-2017,Rotterdam to Antwerp,244000389
+,LIBEL,Libel Transport,SHP-2018,Utrecht to Amsterdam,244750073
+,TX14 GRIETJE,Grietje Fishing,SHP-2019,Den Helder to Texel,246014000
+,KRVE 62,KRVE Port Services,SHP-2020,Rotterdam to Europoort,244730125

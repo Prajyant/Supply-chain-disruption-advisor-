@@ -1,0 +1,83 @@
+{
+  "family": "supply-chain-advisor",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/supplyChainTaskRole",
+  "containerDefinitions": [
+    {
+      "name": "supply-chain-advisor",
+      "image": "ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/supply-chain-advisor:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 8000,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {"name": "AWS_REGION", "value": "us-east-1"},
+        {"name": "BEDROCK_MODEL_ID", "value": "us.anthropic.claude-sonnet-4-20250514-v1:0"},
+        {"name": "AIS_PROVIDER", "value": "demo"},
+        {"name": "VESSEL_POLL_INTERVAL_SECONDS", "value": "300"},
+        {"name": "VESSEL_SILENCE_THRESHOLD_HOURS", "value": "6"},
+        {"name": "VESSEL_STALE_THRESHOLD_HOURS", "value": "1"},
+        {"name": "VESSEL_HISTORY_RETENTION_DAYS", "value": "90"},
+        {"name": "VESSEL_IDENTITY_CACHE_DAYS", "value": "30"},
+        {"name": "SES_SENDER_EMAIL", "value": "supplychain.disruptionadvisor@gmail.com"},
+        {"name": "GEMINI_MODEL", "value": "gemini-2.0-flash"}
+      ],
+      "secrets": [
+        {
+          "name": "OPENAI_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:supply-chain-advisor/secrets:OPENAI_API_KEY::"
+        },
+        {
+          "name": "GEMINI_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:supply-chain-advisor/secrets:GEMINI_API_KEY::"
+        },
+        {
+          "name": "JWT_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:supply-chain-advisor/secrets:JWT_SECRET::"
+        },
+        {
+          "name": "FIREBASE_PROJECT_ID",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:supply-chain-advisor/secrets:FIREBASE_PROJECT_ID::"
+        },
+        {
+          "name": "AIS_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:supply-chain-advisor/secrets:AIS_API_KEY::"
+        },
+        {
+          "name": "EQUASIS_USERNAME",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:supply-chain-advisor/secrets:EQUASIS_USERNAME::"
+        },
+        {
+          "name": "EQUASIS_PASSWORD",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:supply-chain-advisor/secrets:EQUASIS_PASSWORD::"
+        },
+        {
+          "name": "SES_ALERT_RECIPIENTS",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:supply-chain-advisor/secrets:SES_ALERT_RECIPIENTS::"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/supply-chain-advisor",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 120
+      }
+    }
+  ]
+}

@@ -1,0 +1,108 @@
+{
+  "family": "supply-chain-advisor",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/supplyChainTaskRole",
+  "containerDefinitions": [
+    {
+      "name": "supply-chain-advisor",
+      "image": "ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/supply-chain-advisor:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 8000,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {"name": "AWS_DEFAULT_REGION", "value": "us-east-1"},
+        {"name": "AWS_REGION", "value": "us-east-1"},
+        {"name": "BEDROCK_MODEL_ID", "value": "us.anthropic.claude-sonnet-4-20250514-v1:0"},
+        {"name": "GEMINI_MODEL", "value": "gemini-1.5-flash"},
+        {"name": "AIS_PROVIDER", "value": "aisstream"},
+        {"name": "WATCHLIST_CSV_PATH", "value": "./watchlist.csv"},
+        {"name": "VESSEL_POLL_INTERVAL_SECONDS", "value": "10"},
+        {"name": "VESSEL_SILENCE_THRESHOLD_HOURS", "value": "6"},
+        {"name": "VESSEL_STALE_THRESHOLD_HOURS", "value": "1"},
+        {"name": "VESSEL_HISTORY_RETENTION_DAYS", "value": "90"},
+        {"name": "VESSEL_IDENTITY_CACHE_DAYS", "value": "30"},
+        {"name": "VESSEL_REGISTRY_CACHE_DB", "value": "data/vessel_registry_cache.db"},
+        {"name": "VESSEL_REGISTRY_CACHE_DAYS", "value": "30"},
+        {"name": "SANCTIONS_CACHE_DB", "value": "data/sanctions_cache.db"},
+        {"name": "SANCTIONS_CACHE_HOURS", "value": "24"},
+        {"name": "TARIFF_CACHE_DB", "value": "data/tariff_cache.db"},
+        {"name": "TARIFF_CACHE_DAYS", "value": "7"},
+        {"name": "SES_SENDER_EMAIL", "value": "supplychain.disruptionadvisor@gmail.com"},
+        {"name": "SES_ALERT_RECIPIENTS", "value": "kashish.xa@gmail.com"},
+        {"name": "SES_RECIPIENTS_OPERATIONS", "value": "taranpreet.kaur591@gmail.com"},
+        {"name": "SES_RECIPIENTS_FINANCE", "value": "kashish.xa@gmail.com"},
+        {"name": "SES_RECIPIENTS_ANALYST", "value": "pajusiag@gmail.com"},
+        {"name": "SES_RECIPIENTS_EXECUTIVE", "value": "sparshnautiyal2005@gmail.com"},
+        {"name": "SES_REGION", "value": "us-east-1"},
+        {"name": "VITE_API_URL", "value": "REPLACE_WITH_ALB_DNS"},
+        {"name": "STREAMLIT_API_URL", "value": "REPLACE_WITH_ALB_DNS"},
+        {"name": "VITE_FIREBASE_API_KEY", "value": "AIzaSyCFZn3bGVmPDH3i01F2zYbLMDRKZkz0_AA"},
+        {"name": "VITE_FIREBASE_AUTH_DOMAIN", "value": "supplychain-61cbb.firebaseapp.com"},
+        {"name": "VITE_FIREBASE_PROJECT_ID", "value": "supplychain-61cbb"},
+        {"name": "VITE_FIREBASE_STORAGE_BUCKET", "value": "supplychain-61cbb.firebasestorage.app"},
+        {"name": "VITE_FIREBASE_MESSAGING_SENDER_ID", "value": "142814059318"},
+        {"name": "VITE_FIREBASE_APP_ID", "value": "1:142814059318:web:dfc0d6fa2c8843d796f197"},
+        {"name": "FIREBASE_SERVICE_ACCOUNT_KEY", "value": ""},
+        {"name": "VESSEL_TRACKER_API_URL", "value": ""},
+        {"name": "VESSEL_TRACKER_API_KEY", "value": ""}
+      ],
+      "secrets": [
+        {
+          "name": "GMAIL_USER",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:supply-chain-advisor/secrets:GMAIL_USER::"
+        },
+        {
+          "name": "GMAIL_APP_PASSWORD",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:supply-chain-advisor/secrets:GMAIL_APP_PASSWORD::"
+        },
+        {
+          "name": "OPENAI_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:supply-chain-advisor/secrets:OPENAI_API_KEY::"
+        },
+        {
+          "name": "JWT_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:supply-chain-advisor/secrets:JWT_SECRET::"
+        },
+        {
+          "name": "FIREBASE_PROJECT_ID",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:supply-chain-advisor/secrets:FIREBASE_PROJECT_ID::"
+        },
+        {
+          "name": "AIS_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:supply-chain-advisor/secrets:AIS_API_KEY::"
+        },
+        {
+          "name": "EQUASIS_USERNAME",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:supply-chain-advisor/secrets:EQUASIS_USERNAME::"
+        },
+        {
+          "name": "EQUASIS_PASSWORD",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:supply-chain-advisor/secrets:EQUASIS_PASSWORD::"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/supply-chain-advisor",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 120
+      }
+    }
+  ]
+}
